@@ -1,12 +1,14 @@
 # Creative Projects Monthly Summary
 
-A simple WordPress plugin that automatically publishes a monthly post counting how many posts from the prior month were tagged **Creative Projects**.
+A WordPress plugin that automatically publishes a monthly post counting how many posts from the prior month were tagged **Creative Projects**, along with total post counts, a percentage, and an inline bar chart.
 
 ## What It Does
 
-On the 1st of each month, the plugin creates a new published post in the format:
+On the 1st of each month, the plugin creates a new published post containing:
 
-> Posted 7 creative project posts during the 30 days in April 2026.
+1. **Tagged post count** — *"Posted 7 creative project posts during the 30 days in April 2026."*
+2. **Total + percentage** — *"7 of 23 total posts this month were tagged Creative Projects — 30.4% of all posts."*
+3. **Inline bar chart** — a pure SVG chart showing the last 12 months of total posts (grey) vs tagged posts (orange), embedded directly in the post with no external dependencies.
 
 ## Installation
 
@@ -18,12 +20,13 @@ A **CP Summary** item will appear in the left admin sidebar.
 
 ## Configuration
 
-Open the `.php` file and update these two constants near the top before activating:
+Open the `.php` file and update these constants near the top before activating:
 
 | Constant | Description |
 |---|---|
 | `CPS_AUTHOR_ID` | Your WordPress user ID. Find it at WP Admin → Users → hover your username and look for `user_id=N` in the URL. |
-| `CPS_TAG_SLUG` | The tag **slug** (not display name) to count by default. WordPress slugs are lowercase with hyphens — e.g. `creative-projects`. Find slugs at WP Admin → Posts → Tags. |
+| `CPS_TAG_SLUG` | The tag **slug** to count by default. WordPress slugs are lowercase with hyphens — e.g. `creative-projects`. Find slugs at WP Admin → Posts → Tags. |
+| `CPS_CHART_MONTHS` | How many months of history to show in the chart. Default: `12`. |
 
 ## Manual Run
 
@@ -34,9 +37,13 @@ Go to **WP Admin → CP Summary** to generate a summary post on demand for any t
 
 After generating, a link to edit or view the new post appears immediately on the page.
 
+## The Chart
+
+The bar chart is rendered as a pure SVG element embedded in the post content — no JavaScript, no external libraries, no CDN dependencies. It works on any theme and won't conflict with security plugins. Hovering a bar shows a tooltip with the exact count. The chart always covers the last `CPS_CHART_MONTHS` months relative to the post's target month, so backfilled historical posts show the correct window for their period.
+
 ## Confirming Scheduled Runs
 
-Once activated, a blue notice will appear at the top of every WP Admin page showing the date and time of the next scheduled automatic post.
+Once activated, a blue notice appears at the top of every WP Admin page showing the date and time of the next scheduled automatic post.
 
 ## Notes
 

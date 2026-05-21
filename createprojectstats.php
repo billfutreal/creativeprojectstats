@@ -2,9 +2,9 @@
 /**
  * Plugin Name: Creative Projects Monthly Summary
  * Description: On the 1st of each month, publishes a post counting how many posts
- *              from the prior month were tagged "Creative Projects". Also provides
- *              an admin page to re-run the summary for any tag and any month.
- * Version:     1.2
+ *              from the prior month were tagged "Creative Projects", shows total posts,
+ *              percentage, and an inline bar chart of tagged vs total posts by month.
+ * Version:     1.3
  * Author:      Bill Futreal
  */
 
@@ -22,6 +22,9 @@ define( 'CPS_AUTHOR_ID', 1 );
 // WordPress converts tag names to slugs: lowercase, spaces become hyphens.
 // "Creative Projects" → slug is "creative-projects"
 define( 'CPS_TAG_SLUG', 'creative-projects' );
+
+// How many months of history to show in the chart (including current month).
+define( 'CPS_CHART_MONTHS', 12 );
 
 // ---------------------------------------------------------------------------
 // SCHEDULE — register a monthly cron event on plugin activation
@@ -56,12 +59,191 @@ function cps_add_monthly_schedule( $schedules ) {
 add_action( 'cps_monthly_event', 'cps_create_summary_post' );
 
 // ---------------------------------------------------------------------------
+// HELPERS — count posts for a given month
+// ---------------------------------------------------------------------------
+
+/**
+ * Count all published posts in a given month.
+ */
+function cps_count_all_posts( DateTimeImmutable $first, DateTimeImmutable $last ) {
+    $q = new WP_Query( array(
+        'post_type'      => 'post',
+        'post_status'    => 'publish',
+        'posts_per_page' => -1,
+        'fields'         => 'ids',
+        'date_query'     => array(
+            array(
+                'after'     => $first->format( 'Y-m-d H:i:s' ),
+                'before'    => $last->format( 'Y-m-d H:i:s' ),
+                'inclusive' => true,
+                'column'    => 'post_date',
+            ),
+        ),
+    ) );
+    return (int) $q->found_posts;
+}
+
+/**
+ * Count published posts with a specific tag slug in a given month.
+ */
+function cps_count_tagged_posts( $slug, DateTimeImmutable $first, DateTimeImmutable $last ) {
+    $q = new WP_Query( array(
+        'post_type'      => 'post',
+        'post_status'    => 'publish',
+        'posts_per_page' => -1,
+        'fields'         => 'ids',
+        'tag'            => $slug,
+        'date_query'     => array(
+            array(
+                'after'     => $first->format( 'Y-m-d H:i:s' ),
+                'before'    => $last->format( 'Y-m-d H:i:s' ),
+                'inclusive' => true,
+                'column'    => 'post_date',
+            ),
+        ),
+    ) );
+    return (int) $q->found_posts;
+}
+
+/**
+ * Build chart history data: last N months ending with $target_first.
+ * Returns array of [ 'label' => 'Jan 26', 'tagged' => N, 'total' => N ]
+ */
+function cps_build_chart_data( $slug, DateTimeImmutable $target_first, $num_months ) {
+    $tz   = wp_timezone();
+    $data = array();
+
+    for ( $i = $num_months - 1; $i >= 0; $i-- ) {
+        $first = $target_first->modify( "-$i months" );
+        $last  = $first->modify( 'last day of this month' )->setTime( 23, 59, 59 );
+
+        $data[] = array(
+            'label'  => $first->format( 'M y' ),
+            'tagged' => cps_count_tagged_posts( $slug, $first, $last ),
+            'total'  => cps_count_all_posts( $first, $last ),
+        );
+    }
+
+    return $data;
+}
+
+// ---------------------------------------------------------------------------
+// CHART HTML — self-contained inline SVG bar chart (no external dependencies)
+// ---------------------------------------------------------------------------
+
+function cps_render_chart( array $chart_data, $tag_label ) {
+    $num      = count( $chart_data );
+    $w        = 680;
+    $h        = 260;
+    $pad_l    = 40;
+    $pad_r    = 20;
+    $pad_t    = 20;
+    $pad_b    = 50;
+    $chart_w  = $w - $pad_l - $pad_r;
+    $chart_h  = $h - $pad_t - $pad_b;
+
+    $max_total = max( array_column( $chart_data, 'total' ) );
+    $max_val   = max( $max_total, 1 );
+
+    $group_w  = $chart_w / $num;
+    $bar_w    = max( 6, floor( $group_w * 0.32 ) );
+    $gap      = max( 2, floor( $group_w * 0.06 ) );
+
+    // Y-axis gridlines — 4 lines
+    $grid_lines = '';
+    $y_labels   = '';
+    for ( $g = 0; $g <= 4; $g++ ) {
+        $val   = round( $max_val * $g / 4 );
+        $y_pos = $pad_t + $chart_h - ( $chart_h * $g / 4 );
+        $grid_lines .= sprintf(
+            '<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="#e0e0e0" stroke-width="1"/>',
+            $pad_l, $y_pos, $w - $pad_r, $y_pos
+        );
+        $y_labels .= sprintf(
+            '<text x="%d" y="%.1f" text-anchor="end" font-size="10" fill="#999" font-family="Georgia,serif">%d</text>',
+            $pad_l - 4, $y_pos + 4, $val
+        );
+    }
+
+    // Bars and x-axis labels
+    $bars   = '';
+    $labels = '';
+    foreach ( $chart_data as $i => $d ) {
+        $cx         = $pad_l + $group_w * $i + $group_w / 2;
+        $x_total    = $cx - $bar_w - $gap / 2;
+        $x_tagged   = $cx + $gap / 2;
+
+        $h_total  = $d['total']  > 0 ? ( $chart_h * $d['total']  / $max_val ) : 0;
+        $h_tagged = $d['tagged'] > 0 ? ( $chart_h * $d['tagged'] / $max_val ) : 0;
+
+        $y_total  = $pad_t + $chart_h - $h_total;
+        $y_tagged = $pad_t + $chart_h - $h_tagged;
+
+        // Total bar (muted blue-grey)
+        $bars .= sprintf(
+            '<rect x="%.1f" y="%.1f" width="%d" height="%.1f" fill="#b0bec5" rx="2">
+                <title>%s: %d total posts</title>
+            </rect>',
+            $x_total, $y_total, $bar_w, $h_total,
+            esc_attr( $d['label'] ), $d['total']
+        );
+
+        // Tagged bar (warm accent)
+        $bars .= sprintf(
+            '<rect x="%.1f" y="%.1f" width="%d" height="%.1f" fill="#e07b39" rx="2">
+                <title>%s: %d tagged posts</title>
+            </rect>',
+            $x_tagged, $y_tagged, $bar_w, $h_tagged,
+            esc_attr( $d['label'] ), $d['tagged']
+        );
+
+        // X label
+        $labels .= sprintf(
+            '<text x="%.1f" y="%d" text-anchor="middle" font-size="10" fill="#666" font-family="Georgia,serif">%s</text>',
+            $cx, $h - $pad_b + 14, esc_html( $d['label'] )
+        );
+    }
+
+    // Legend
+    $legend_y   = $h - 10;
+    $legend_x1  = $pad_l;
+    $legend_x2  = $pad_l + 100;
+    $tag_escaped = esc_html( $tag_label );
+
+    $legend = '
+        <rect x="' . $legend_x1 . '" y="' . ( $legend_y - 8 ) . '" width="12" height="12" fill="#b0bec5" rx="2"/>
+        <text x="' . ( $legend_x1 + 16 ) . '" y="' . $legend_y . '" font-size="11" fill="#555" font-family="Georgia,serif">Total posts</text>
+        <rect x="' . $legend_x2 . '" y="' . ( $legend_y - 8 ) . '" width="12" height="12" fill="#e07b39" rx="2"/>
+        <text x="' . ( $legend_x2 + 16 ) . '" y="' . $legend_y . '" font-size="11" fill="#555" font-family="Georgia,serif">' . $tag_escaped . '</text>
+    ';
+
+    return sprintf(
+        '<figure style="margin:2em 0;">
+            <svg viewBox="0 0 %d %d" xmlns="http://www.w3.org/2000/svg"
+                 style="width:100%%;max-width:%dpx;height:auto;display:block;font-family:Georgia,serif;">
+                %s
+                %s
+                %s
+                %s
+                %s
+                <line x1="%d" y1="%d" x2="%d" y2="%d" stroke="#ccc" stroke-width="1"/>
+            </svg>
+        </figure>',
+        $w, $h, $w,
+        $grid_lines,
+        $y_labels,
+        $bars,
+        $labels,
+        $legend,
+        $pad_l, $pad_t + $chart_h, $w - $pad_r, $pad_t + $chart_h  // x-axis baseline
+    );
+}
+
+// ---------------------------------------------------------------------------
 // CORE FUNCTION — count posts and publish the summary
 // ---------------------------------------------------------------------------
 
 /**
- * Create a summary post.
- *
  * @param string|null $tag_slug  Tag slug to count. Defaults to CPS_TAG_SLUG.
  * @param int|null    $year      Year of the month to summarise. Defaults to previous month.
  * @param int|null    $month     Month number (1-12) to summarise. Defaults to previous month.
@@ -83,40 +265,40 @@ function cps_create_summary_post( $tag_slug = null, $year = null, $month = null 
     $month_label    = $first_of_target->format( 'F Y' );
     $days_in_month  = (int) $first_of_target->format( 't' );
 
-    // Resolve the tag slug.
-    $slug = $tag_slug ? sanitize_title( $tag_slug ) : CPS_TAG_SLUG;
-
-    // Query by slug — works regardless of display-name capitalisation.
-    $query = new WP_Query( array(
-        'post_type'      => 'post',
-        'post_status'    => 'publish',
-        'posts_per_page' => -1,
-        'fields'         => 'ids',
-        'tag'            => $slug,
-        'date_query'     => array(
-            array(
-                'after'     => $first_of_target->format( 'Y-m-d H:i:s' ),
-                'before'    => $last_of_target->format( 'Y-m-d H:i:s' ),
-                'inclusive' => true,
-                'column'    => 'post_date',
-            ),
-        ),
-    ) );
-
-    $count = $query->found_posts;
-
-    // Use the tag's display name if available.
-    $tag_obj   = get_term_by( 'slug', $slug, 'post_tag' );
+    // Resolve tag.
+    $slug    = $tag_slug ? sanitize_title( $tag_slug ) : CPS_TAG_SLUG;
+    $tag_obj = get_term_by( 'slug', $slug, 'post_tag' );
     $tag_label = $tag_obj ? $tag_obj->name : $slug;
 
-    $title   = $tag_label . ' — ' . $month_label;
-    $content = sprintf(
+    // Count tagged and total posts for the target month.
+    $tagged_count = cps_count_tagged_posts( $slug, $first_of_target, $last_of_target );
+    $total_count  = cps_count_all_posts( $first_of_target, $last_of_target );
+    $percentage   = $total_count > 0 ? round( ( $tagged_count / $total_count ) * 100, 1 ) : 0;
+
+    // Build chart data across the last N months.
+    $chart_data = cps_build_chart_data( $slug, $first_of_target, CPS_CHART_MONTHS );
+    $chart_html = cps_render_chart( $chart_data, $tag_label );
+
+    // Compose post content.
+    $title = $tag_label . ' — ' . $month_label;
+
+    $content  = sprintf(
         '<p>Posted %d creative project post%s during the %d days in %s.</p>',
-        $count,
-        $count === 1 ? '' : 's',
+        $tagged_count,
+        $tagged_count === 1 ? '' : 's',
         $days_in_month,
         esc_html( $month_label )
     );
+    $content .= sprintf(
+        '<p>%d of %d total post%s this month %s tagged <strong>%s</strong> — <strong>%s%%</strong> of all posts.</p>',
+        $tagged_count,
+        $total_count,
+        $total_count === 1 ? '' : 's',
+        $tagged_count === 1 ? 'was' : 'were',
+        esc_html( $tag_label ),
+        $percentage
+    );
+    $content .= "\n\n" . $chart_html;
 
     $post_id = wp_insert_post( array(
         'post_title'   => $title,
@@ -167,23 +349,20 @@ function cps_admin_notice() {
 }
 
 // ---------------------------------------------------------------------------
-// ADMIN MENU — top-level menu item (avoids submenu visibility issues)
+// ADMIN MENU — top-level menu item
 // ---------------------------------------------------------------------------
 
-// Use priority 5 to ensure it runs early, before some themes/plugins interfere.
 add_action( 'admin_menu', 'cps_add_admin_page', 5 );
 
 function cps_add_admin_page() {
-    // Use 'edit_posts' instead of 'manage_options' — any editor or above can access.
-    // Change back to 'manage_options' if you want to restrict to admins only.
     add_menu_page(
-        'CP Summary',           // Page title
-        'CP Summary',           // Menu label
-        'edit_posts',           // Capability — editors and above
-        'cps-manual-run',       // Menu slug
-        'cps_admin_page_html',  // Callback
-        'dashicons-list-view',  // Icon
-        30                      // Position (after Comments)
+        'CP Summary',
+        'CP Summary',
+        'edit_posts',
+        'cps-manual-run',
+        'cps_admin_page_html',
+        'dashicons-list-view',
+        30
     );
 }
 
